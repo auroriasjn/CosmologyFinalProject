@@ -257,63 +257,54 @@ def pm_force(pos, a, green_x, green_y, green_z, Ng: int, L: float, params: Cosmo
     return jnp.stack([ax, ay, az], axis=-1)
 
 
-def make_cosmo_ic(Np, Ng, L, pk_func, a_init, params: CosmologicalParameters,seed=42):
+def get_zeldovich_factors(a, params: CosmologicalParameters):
+    """
+    Compute the normalized linear growth factor, its derivative, 
+    and the Hubble parameter for Zel'dovich displacements.
+    
+    Normalizes the growth factor by D_+(z=0) to ensure 
+    consistency with z=0 power spectra amplitudes.
+    """
+    # 1. Unnormalized growth factor and Hubble parameter at scale factor 'a'
+    D_a_unnorm = D_plus(a, params)
+    H_a = H(a, params)
+
+    # 2. Get the gradient of H(a)
+    dH_da = grad(H, argnums=0)(a, params)
+
+    # 3. Calculate dD/da analytically (unnormalized)
+    dD_da_unnorm = (dH_da / H_a) * D_a_unnorm + (2.5 * params.Omega_m) / (a**3 * H_a**2)
+
+    # 4. Normalize by D_+(z=0) 
+    D_z0 = D_plus(1.0, params)
+    D_a = D_a_unnorm / D_z0
+    dD_da = dD_da_unnorm / D_z0
+
+    return D_a, H_a, dD_da
+
+def make_cosmo_ic(Np, Ng, L, pk_func, a_init, params: CosmologicalParameters, seed=42):
     """
     Generate cosmological Zel'dovich ICs from a power spectrum.
-
-    Parameters
-    ----------
-    Np : int
-        Particles per dimension.
-    Ng : int
-        Grid cells per dimension.
-    L : float
-        Box size (same units as P(k), e.g. Mpc/h).
-    pk_func : callable
-        P(k) function, k in h/Mpc, returns (Mpc/h)^3.
-    a_init : float
-        Initial scale factor.
-    params : CosmologicalParameters
-        Cosmological parameters.
-    seed : int
-        Random seed.
-
-    Returns
-    -------
-    pos, mom, q : arrays
-        Positions, momenta, and Lagrangian grid.
     """
     h = L / Ng
     V = L**3
 
-    # Wavenumber grid (angular wavenumber k in h/Mpc)
-    # fftfreq returns frequency nu = n/(N*h); multiply by 2pi for k
-    kfreq = 2 * np.pi * np.fft.fftfreq(Ng, d=h)   # k in h/Mpc
+    kfreq = 2 * np.pi * np.fft.fftfreq(Ng, d=h)
     kx, ky, kz = np.meshgrid(kfreq, kfreq, kfreq, indexing='ij')
     kmag = np.sqrt(kx**2 + ky**2 + kz**2)
-    kmag[0, 0, 0] = 1.0  # avoid division by zero
+    kmag[0, 0, 0] = 1.0
 
-    # Power spectrum on the grid
     pk_grid = pk_func(kmag)
-    pk_grid[0, 0, 0] = 0.0  # no mean overdensity
+    pk_grid[0, 0, 0] = 0.0
 
-    # Generate Gaussian random field by "coloring" white noise.
-    # Start with real-space white noise, FFT it (reality condition is
-    # automatic since the input is real), then multiply by sqrt(P(k))
-    # to imprint the power spectrum.
-    #
-    # Normalization: E[|noise_hat_k|^2] = Ng^3 for white noise.
-    # We want E[|delta_hat_k|^2] = Ng^6 P(k) / V, so multiply
-    # noise_hat by Ng^{3/2} sqrt(P(k)/V).
     rng = np.random.default_rng(seed)
     white_noise = rng.standard_normal((Ng, Ng, Ng))
     noise_hat = np.fft.fftn(white_noise)
 
     amplitude = Ng**1.5 * np.sqrt(pk_grid / V)
     delta_hat = amplitude * noise_hat
-    delta_hat[0, 0, 0] = 0.0  # no mean overdensity
+    delta_hat[0, 0, 0] = 0.0
 
-    # Displacement field: Psi_i(k) = -i k_i / k^2 * delta_hat(k)
     inv_k2 = 1.0 / (kmag**2)
     inv_k2[0, 0, 0] = 0.0
 
@@ -321,17 +312,13 @@ def make_cosmo_ic(Np, Ng, L, pk_func, a_init, params: CosmologicalParameters,see
     psi_hat_y = -1j * ky * inv_k2 * delta_hat
     psi_hat_z = -1j * kz * inv_k2 * delta_hat
 
-    # Transform to real space
     psi_x = np.fft.ifftn(psi_hat_x).real
     psi_y = np.fft.ifftn(psi_hat_y).real
     psi_z = np.fft.ifftn(psi_hat_z).real
 
-    # Lagrangian grid
     q = make_uniform_grid(Np, L)
     q_np = np.array(q)
 
-    # Interpolate displacement to particle positions
-    # For Np = Ng, particles sit at grid centers — direct indexing
     idx = np.round(q_np / h - 0.5).astype(int) % Ng
 
     psi_at_q = np.stack([
@@ -340,21 +327,12 @@ def make_cosmo_ic(Np, Ng, L, pk_func, a_init, params: CosmologicalParameters,see
         psi_z[idx[:, 0], idx[:, 1], idx[:, 2]],
     ], axis=-1)
 
-    # Zel'dovich: x = q + D_+(a) * Psi, p = a^{3/2} * Psi  (EdS)
-    D_a = D_plus(a_init, params)
-    H_a = H(a_init, params)
+    # --- REFACTORED ZEL'DOVICH LOGIC ---
+    D_a, H_a, dD_da = get_zeldovich_factors(a_init, params)
 
-    # 2. Get the gradient of H(a) - this is perfectly safe!
-    dH_da = grad(H, argnums=0)(a_init, params)
-
-    # 3. Calculate dD/da analytically
-    dD_da = (dH_da / H_a) * D_a + (2.5 * params.Omega_m) / (a_init**3 * H_a**2)
-
-    # 4. Apply general Zel'dovich equations
     pos = jnp.array((q_np + D_a * psi_at_q) % L)
     mom = jnp.array((a_init**3 * H_a * dD_da) * psi_at_q)
 
-    # Also return the z=0 linear density field (delta_hat is at z=0)
     delta0 = np.fft.ifftn(delta_hat).real
 
     return pos, mom, q, delta0
@@ -363,27 +341,18 @@ def make_cosmo_ic(Np, Ng, L, pk_func, a_init, params: CosmologicalParameters,see
 def make_zeldovich_ic(Np, L, n_mode, A, a_init, params: CosmologicalParameters):
     """
     Create Zel'dovich initial conditions for a single sine-wave mode.
-    Now generalized for any cosmology.
     """
-    # Lagrangian grid
     q = make_uniform_grid(Np, L)
     k = 2 * jnp.pi * n_mode / L
 
-    # Displacement field: Psi_x = -(A/k) sin(k q_x)
     psi_x = -(A / k) * jnp.sin(k * q[:, 0])
 
-    # Cosmology parameters at a_init
-    D_a = D_plus(a_init, params)
-    H_a = H(a_init, params)
-    
-    dH_da = grad(H, argnums=0)(a_init, params)
-    dD_da = (dH_da / H_a) * D_a + (2.5 * params.Omega_m) / (a_init**3 * H_a**2)
+    # --- REFACTORED ZEL'DOVICH LOGIC ---
+    D_a, H_a, dD_da = get_zeldovich_factors(a_init, params)
 
-    # Positions: x = q + D_+(a) * Psi
     pos = q.at[:, 0].add(D_a * psi_x)
-    pos = pos % L  # periodic wrapping
+    pos = pos % L
 
-    # Momenta: p = a^3 * H(a) * dD_+/da * Psi
     mom = jnp.zeros_like(q)
     mom = mom.at[:, 0].set((a_init**3 * H_a * dD_da) * psi_x)
 
@@ -393,22 +362,15 @@ def make_zeldovich_ic(Np, L, n_mode, A, a_init, params: CosmologicalParameters):
 def zeldovich_prediction(q, n_mode, A, a, L, params: CosmologicalParameters):
     """
     Zel'dovich position and momentum at scale factor a.
-    Now generalized for any cosmology.
     """
     k = 2 * jnp.pi * n_mode / L
     psi_x = -(A / k) * jnp.sin(k * q[:, 0])
 
-    # Cosmology parameters at current scale factor 'a'
-    D_a = D_plus(a, params)
-    H_a = H(a, params)
-    
-    dH_da = grad(H, argnums=0)(a, params)
-    dD_da = (dH_da / H_a) * D_a + (2.5 * params.Omega_m) / (a**3 * H_a**2)
+    # --- REFACTORED ZEL'DOVICH LOGIC ---
+    D_a, H_a, dD_da = get_zeldovich_factors(a, params)
 
-    # Exact linear positions: x = q + D_+(a) * Psi
     pos_exact = q.at[:, 0].add(D_a * psi_x) % L
     
-    # Exact linear momenta: p = a^3 * H(a) * dD_+/da * Psi
     mom_exact = jnp.zeros_like(q)
     mom_exact = mom_exact.at[:, 0].set((a**3 * H_a * dD_da) * psi_x)
 

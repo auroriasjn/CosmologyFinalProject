@@ -3,32 +3,19 @@ import jax.numpy as jnp
 
 from .cosmo_utils import H, CosmologicalParameters
 from .pm_utils import pm_force
+from .jax_utils import _jax_integral
 from functools import lru_cache, partial
 from jax import jit
 
-# MY CONTRIBUTION - GENERALIZABLE DRIFT AND KICK FACTORS
-def _jax_integral(f, a_1, a_2, n_quad):
-    # n_quad must be odd for Simpson's rule
-    x = jnp.linspace(a_1, a_2, n_quad)
-    y = f(x)
-    h = (a_2 - a_1) / (n_quad - 1)
-
-    return h / 3.0 * (
-        y[0]
-        + y[-1]
-        + 4.0 * jnp.sum(y[1:-1:2])
-        + 2.0 * jnp.sum(y[2:-2:2])
-    )
+@partial(jit, static_argnames=["params", "n_quad"])
+def drift_factor(a_1, a_2, params, n_quad=201):
+    f_log = lambda log_a: 1.0 / (jnp.exp(log_a)**2 * H(jnp.exp(log_a), params=params))
+    return _jax_integral(f_log, jnp.log(a_1), jnp.log(a_2), n_quad)
 
 @partial(jit, static_argnames=["params", "n_quad"])
-def drift_factor(a_1, a_2, params, n_quad=65):
-    f = lambda a: 1.0 / (a**3 * H(a, params=params))
-    return _jax_integral(f, a_1, a_2, n_quad)
-
-@partial(jit, static_argnames=["params", "n_quad"])
-def kick_factor(a_1, a_2, params, n_quad=65):
-    f = lambda a: 1.0 / (a * H(a, params=params))
-    return _jax_integral(f, a_1, a_2, n_quad)
+def kick_factor(a_1, a_2, params, n_quad=201):
+    f_log = lambda log_a: 1.0 / H(jnp.exp(log_a), params=params)
+    return _jax_integral(f_log, jnp.log(a_1), jnp.log(a_2), n_quad)
 
 @lru_cache(maxsize=None)
 def create_symplectic_grid(a_1, a_2, n_steps, params: CosmologicalParameters):

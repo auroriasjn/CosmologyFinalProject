@@ -1,6 +1,7 @@
 import jax
 import numpy as np
 import jax.numpy as jnp
+from functools import cache
 from scipy.interpolate import interp1d
 from classy import Class
 
@@ -30,19 +31,34 @@ def create_cosmo_instance(
     cosmo.compute()
     return cosmo
 
+@cache
+def _build_pk_interpolator(cosmo, z: float):
+    """Hidden helper that caches the interpolator based on cosmo and redshift."""
+    k_arr, pk_arr = create_power_spectrum(cosmo, z=z) 
+    
+    return interp1d(
+        np.log(k_arr), 
+        np.log(pk_arr), 
+        kind='cubic', 
+        fill_value=-100.0, 
+        bounds_error=False
+    )
+
+def pk_of_k(k, cosmo: Class, z: float = 0.0):
+    """Helper function to compute P(k) for a single k at a specific redshift."""
+    # The cache is now keyed by both the cosmo object AND the redshift
+    log_pk_interp = _build_pk_interpolator(cosmo, z)
+    return np.exp(log_pk_interp(np.log(k)))
 
 def create_power_spectrum(cosmo: Class, z: float = 0.0, k_min: float = 1e-4, k_max: float = 10.0, n_k: int = 1000):
     """Create the linear matter power spectrum P(k) from the CLASS instance."""
 
     k_values = np.logspace(np.log10(k_min), np.log10(k_max), n_k)
     P_k = np.array([cosmo.pk(k, z) for k in k_values])
-    cosmo.struct_cleanup()
-
+    
     return k_values, P_k
 
-def pk_of_k(k, cosmo: Class):
+def pk_of_k(k, cosmo: Class, z: float = 0.0):
     """Helper function to compute P(k) for a single k."""
-    k_arr, pk_arr = create_power_spectrum(cosmo)
-
-    log_pk_interp = interp1d(np.log(k_arr), np.log(pk_arr), kind='cubic', fill_value=-100.0, bounds_error=False)
+    log_pk_interp = _build_pk_interpolator(cosmo=cosmo, z=z)
     return np.exp(log_pk_interp(np.log(k)))

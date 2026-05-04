@@ -8,14 +8,14 @@ from functools import lru_cache, partial
 from jax import jit
 
 @partial(jit, static_argnames=["params", "n_quad"])
-def drift_factor(a_1, a_2, params, n_quad=65):
-    f = lambda a: 1.0 / (a**3 * H(a, params=params))
-    return _jax_integral(f, a_1, a_2, n_quad)
+def drift_factor(a_1, a_2, params, n_quad=201):
+    f_log = lambda log_a: 1.0 / (jnp.exp(log_a)**2 * H(jnp.exp(log_a), params=params))
+    return _jax_integral(f_log, jnp.log(a_1), jnp.log(a_2), n_quad)
 
 @partial(jit, static_argnames=["params", "n_quad"])
-def kick_factor(a_1, a_2, params, n_quad=65):
-    f = lambda a: 1.0 / (a * H(a, params=params))
-    return _jax_integral(f, a_1, a_2, n_quad)
+def kick_factor(a_1, a_2, params, n_quad=201):
+    f_log = lambda log_a: 1.0 / H(jnp.exp(log_a), params=params)
+    return _jax_integral(f_log, jnp.log(a_1), jnp.log(a_2), n_quad)
 
 @lru_cache(maxsize=None)
 def create_symplectic_grid(a_1, a_2, n_steps, params: CosmologicalParameters):
